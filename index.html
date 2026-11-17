@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#111418">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<title>Gas Sniffer</title>
+<style>
+:root{--bg:#111418;--card:#1b2027;--fg:#e8ecf1;--mut:#8a94a3;--good:#3ecf8e;--mod:#f5b942;--poor:#ef5b5b;--warm:#5b9cef}
+*{box-sizing:border-box}body{margin:0;font:16px system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+main{max-width:520px;margin:auto;padding:16px}
+.card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:12px}
+.badge{display:inline-block;padding:6px 14px;border-radius:999px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#111;background:#666}
+.big{font-size:72px;font-weight:700;line-height:1}
+.row{display:flex;justify-content:space-between;gap:12px;color:var(--mut);font-size:14px;margin-top:8px}
+canvas{width:100%;height:200px;display:block}
+button{width:100%;padding:14px;border:0;border-radius:12px;background:#2b3440;color:var(--fg);font-size:16px;margin-bottom:8px}
+button.primary{background:var(--warm);color:#111;font-weight:600}
+button:active{filter:brightness(1.2)}button:disabled{opacity:.4}
+small{color:var(--mut)}
+</style></head><body><main>
+<div class="card">
+  <span id="badge" class="badge">not connected</span>
+  <div style="margin-top:14px"><span class="big" id="ppm">–</span> <small>ppm CO (estimate)</small></div>
+  <div class="row"><span>Rs/R0 <span id="ratio">–</span></span><span id="mv">– mV</span><span id="name"></span></div>
+</div>
+<div class="card"><canvas id="chart"></canvas>
+  <div class="row"><span>ppm since connecting (max 10 min)</span><span id="axis"></span></div></div>
+<div class="card">
+  <button id="connect" class="primary">Connect to Gas Sniffer</button>
+  <button id="cal" disabled>Set clean-air baseline</button>
+  <p id="msg"><small>Uses Bluetooth, so no Wi-Fi or internet is needed. The ppm figure is an estimate; alcohol and VOCs also raise it. Not a CO alarm.</small></p>
+</div>
+</main><script>
+const SVC='7a1c0001-5f4e-4b8a-9d2e-6c3b2a1f0e01',DATA='7a1c0002-5f4e-4b8a-9d2e-6c3b2a1f0e01',CMD='7a1c0003-5f4e-4b8a-9d2e-6c3b2a1f0e01';
+const C={good:'var(--good)',moderate:'var(--mod)',poor:'var(--poor)',warming:'var(--warm)'};
+const $=id=>document.getElementById(id);
+let device=null,cmdChar=null,hist=[],wantConnected=false,wake=null;
+
+function badge(text,color){$('badge').textContent=text;$('badge').style.background=color||'#666'}
+function say(t){$('msg').innerHTML='<small>'+t+'</small>'}
+
+function draw(){
+  const c=$('chart'),x=c.getContext('2d'),w=c.width=c.clientWidth*devicePixelRatio,h=c.height=c.clientHeight*devicePixelRatio;
+  x.clearRect(0,0,w,h);
+  const v=hist.filter(p=>p!==null);
+  if(v.length<2){$('axis').textContent='';return}
+  const hi=Math.max(10,...v)*1.1,Y=t=>h-t/hi*h;
+  x.strokeStyle='#e8ecf1';x.lineWidth=2*devicePixelRatio;x.beginPath();
+  let pen=false;
+  hist.forEach((t,i)=>{if(t===null){pen=false;return}const px=i/(600-1)*w;pen?x.lineTo(px,Y(t)):x.moveTo(px,Y(t));pen=true});
+  x.stroke();
+  $('axis').textContent='0–'+hi.toFixed(0)+' ppm';
+}
+
+function onData(e){
+  // "mv,ratio,state,ppm" - ratio and ppm are -1 during warm-up
+  const p=new TextDecoder().decode(e.target.value).split(',');
+  const mv=+p[0],ratio=+p[1],state=p[2]||'?',ppm=p.length>3?+p[3]:NaN;
+  const hasPpm=isFinite(ppm)&&ppm>=0;
+  badge(state,C[state]);
+  $('ppm').textContent=hasPpm?(ppm<10?ppm.toFixed(1):ppm.toFixed(0)):'–';
+  $('ratio').textContent=ratio>=0?ratio.toFixed(2):'–';
+  $('mv').textContent=mv.toFixed(0)+' mV';
+  hist.push(hasPpm?ppm:null);if(hist.length>600)hist.shift();
+  draw();
+}
+
+async function openGatt(){
+  badge('connecting…');
+  const server=await device.gatt.connect();
+  const svc=await server.getPrimaryService(SVC);
+  const data=await svc.getCharacteristic(DATA);
+  cmdChar=await svc.getCharacteristic(CMD);
+  data.addEventListener('characteristicvaluechanged',onData);
+  await data.startNotifications();
+  $('name').textContent=device.name||'';
+  $('cal').disabled=false;$('connect').textContent='Disconnect';
+  badge('connected','#8a94a3');
+  try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+}
+
+async function reconnect(){
+  $('cal').disabled=true;cmdChar=null;
+  for(let i=0;wantConnected;i++){
+    badge('reconnecting…');
+    try{await openGatt();return}catch(e){await new Promise(r=>setTimeout(r,Math.min(1000*(i+1),5000)))}
+  }
+}
+
+$('connect').onclick=async()=>{
+  if(wantConnected){
+    wantConnected=false;if(device&&device.gatt.connected)device.gatt.disconnect();
+    $('connect').textContent='Connect to Gas Sniffer';$('cal').disabled=true;badge('not connected');
+    if(wake){wake.release();wake=null}
+    return;
+  }
+  if(!navigator.bluetooth){say('This browser has no Web Bluetooth. Use Chrome on Android.');return}
+  try{
+    device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'GasSniffer-'},{services:[SVC]}],optionalServices:[SVC]});
+    device.addEventListener('gattserverdisconnected',()=>{if(wantConnected)reconnect()});
+    wantConnected=true;
+    await openGatt();
+  }catch(e){
+    wantConnected=false;badge('not connected');
+    if(e.name!=='NotFoundError')say('Could not connect: '+e.message);
+  }
+};
+
+$('cal').onclick=async()=>{
+  if(!cmdChar||!confirm('Set current air as clean baseline?'))return;
+  try{await cmdChar.writeValue(new TextEncoder().encode('CAL'));say('Baseline command sent. It is ignored while the sensor is still warming up.')}
+  catch(e){say('Could not send: '+e.message)}
+};
+
+document.addEventListener('visibilitychange',async()=>{
+  if(document.visibilityState==='visible'&&wantConnected){try{wake=await navigator.wakeLock.request('screen')}catch(e){}}
+});
+addEventListener('resize',draw);
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+</script></body></html>
