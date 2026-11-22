@@ -117,5 +117,5 @@ document.addEventListener('visibilitychange',async()=>{
   if(document.visibilityState==='visible'&&wantConnected){try{wake=await navigator.wakeLock.request('screen')}catch(e){}}
 });
 addEventListener('resize',draw);
-if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script></body></html>

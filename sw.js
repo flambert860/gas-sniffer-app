@@ -1,5 +1,5 @@
 // Offline cache. Bump the version when index.html changes so phones pick up the update.
-const CACHE = 'gas-sniffer-v1';
+const CACHE = 'gas-sniffer-v2';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -14,16 +14,24 @@ self.addEventListener('activate', e => {
   );
 });
 
-// Network first so updates arrive when online; fall back to the cache when offline.
+// Network first so updates arrive when online. Anything other than a good answer
+// (offline, or the site taken down and returning 404) falls back to the cached copy,
+// and never overwrites it.
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
-  e.respondWith(
-    fetch(e.request)
-      .then(r => {
+  e.respondWith((async () => {
+    const cached = await caches.match(e.request, { ignoreSearch: true });
+    try {
+      const r = await fetch(e.request);
+      if (r.ok) {
         const copy = r.clone();
         caches.open(CACHE).then(c => c.put(e.request, copy));
         return r;
-      })
-      .catch(() => caches.match(e.request, { ignoreSearch: true }))
-  );
+      }
+      return cached || r;
+    } catch (err) {
+      if (cached) return cached;
+      throw err;
+    }
+  })());
 });
